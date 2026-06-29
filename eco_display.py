@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """桂晚的瓶中生态展示台 —— 端口 8895
-数据由外部 POST /update 推送，缓存在本地 data.json。
+- GET  /        展示页面
+- POST /update  推送数据（X-Token 鉴权）
+- GET  /mcp     MCP 握手
+- POST /mcp     MCP JSON-RPC（工具：push_eco_data）
 """
 
-import os, json, time
+import os, json
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
@@ -11,6 +14,32 @@ PORT = int(os.environ.get("DISPLAY_PORT", 8895))
 PLAYER_ID = os.environ.get("PLAYER_ID", "guiwan")
 DATA_FILE = Path(os.environ.get("DATA_FILE", "/root/eco-display/data.json"))
 UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "guiwan-eco-2026")
+
+MCP_TOOLS = [
+    {
+        "name": "push_eco_data",
+        "description": "把瓶中生态的最新状态推送到桂晚的展示台。玩完 eco 游戏后调用。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status_json": {
+                    "type": "string",
+                    "description": "eco_info status 返回结果末尾的 JSON 字符串（花括号包裹的那段）"
+                },
+                "chronicle": {
+                    "type": "string",
+                    "description": "eco_info chronicle scope=all 的返回文本"
+                },
+                "locked_count": {
+                    "type": "integer",
+                    "description": "未解锁物种总数（可选，默认 0）",
+                    "default": 0
+                }
+            },
+            "required": ["status_json", "chronicle"]
+        }
+    }
+]
 
 SEASON_CONFIG = {
     "春": {"emoji": "🌸", "color": "#a8d8a8", "bg": "#1a2e1a"},
@@ -154,6 +183,12 @@ class DisplayHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._json({"ok": True}); return
+        if self.path == "/mcp":
+            self._json({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "eco-display-mcp", "version": "1.0.0"}
+            }); return
         if self.path not in ("/", "/index.html"):
             self.send_response(404); self.end_headers(); return
 
@@ -173,21 +208,77 @@ class DisplayHandler(BaseHTTPRequestHandler):
         self._html(html)
 
     def do_POST(self):
-        if self.path != "/update":
-            self.send_response(404); self.end_headers(); return
-        token = self.headers.get("X-Token", "")
-        if token != UPDATE_TOKEN:
-            self.send_response(403); self.end_headers(); return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
-        try:
-            payload = json.loads(body)
-            from datetime import datetime
-            payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
-            self._json({"ok": True})
-        except Exception as e:
-            self._json({"ok": False, "error": str(e)})
+
+        if self.path == "/update":
+            token = self.headers.get("X-Token", "")
+            if token != UPDATE_TOKEN:
+                self.send_response(403); self.end_headers(); return
+            try:
+                payload = json.loads(body)
+                from datetime import datetime
+                payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+                self._json({"ok": True})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+
+        elif self.path == "/mcp":
+            try:
+                req = json.loads(body)
+            except Exception:
+                self._json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+                return
+            method = req.get("method", "")
+            req_id = req.get("id")
+
+            if method == "initialize":
+                self._json({"jsonrpc": "2.0", "id": req_id, "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "eco-display-mcp", "version": "1.0.0"}
+                }})
+            elif method == "tools/list":
+                self._json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": MCP_TOOLS}})
+            elif method == "tools/call":
+                params = req.get("params", {})
+                if params.get("name") == "push_eco_data":
+                    args = params.get("arguments", {})
+                    try:
+                        status_json = args.get("status_json", "{}")
+                        # 提取花括号 JSON
+                        start = status_json.rfind("{")
+                        end = status_json.rfind("}") + 1
+                        if start != -1:
+                            status_obj = json.loads(status_json[start:end])
+                        else:
+                            status_obj = json.loads(status_json)
+                        from datetime import datetime
+                        payload = {
+                            "status": status_obj,
+                            "chronicle": args.get("chronicle", ""),
+                            "locked_count": args.get("locked_count", 0),
+                            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+                        self._json({"jsonrpc": "2.0", "id": req_id, "result": {
+                            "content": [{"type": "text", "text": "✅ 展示台已更新！"}]
+                        }})
+                    except Exception as e:
+                        self._json({"jsonrpc": "2.0", "id": req_id, "result": {
+                            "content": [{"type": "text", "text": f"❌ 推送失败：{e}"}]
+                        }})
+                else:
+                    self._json({"jsonrpc": "2.0", "id": req_id,
+                                "error": {"code": -32601, "message": "Unknown tool"}})
+            elif method == "notifications/initialized":
+                self.send_response(204); self.end_headers()
+            else:
+                self._json({"jsonrpc": "2.0", "id": req_id,
+                            "error": {"code": -32601, "message": f"Method not found: {method}"}})
+        else:
+            self.send_response(404); self.end_headers()
 
     def _html(self, content):
         b = content.encode()
