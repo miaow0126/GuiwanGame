@@ -155,11 +155,11 @@ class Handler(BaseHTTPRequestHandler):
         data_time = cache.get("updated_at", "—") if cache else "—"
         subtitle = f"player: {cache.get('player','guiwan')}" if cache else "等待开张…"
 
-        html = HTML.format(
-            subtitle=subtitle,
-            refresh_time=now,
-            data_time=data_time,
-            body=build_body(cache),
+        html = (HTML
+            .replace("{subtitle}", subtitle)
+            .replace("{refresh_time}", now)
+            .replace("{data_time}", data_time)
+            .replace("{body}", build_body(cache))
         )
         b = html.encode()
         self.send_response(200)
