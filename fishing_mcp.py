@@ -1,9 +1,11 @@
-﻿#!/usr/bin/env python3
-"""妗傛櫄鐨勯挀楸?MCP 鈥斺€?璁?Claude 閫氳繃 MCP 鍗忚鏉ョ帺閽撻奔娓告垙
+#!/usr/bin/env python3
+"""桂晚的钓鱼 MCP — 让 Claude 通过 MCP 协议来玩钓鱼游戏
 
-鐢ㄦ硶锛?  python3 fishing_mcp.py
+用法:  python3 fishing_mcp.py
 
-鐜鍙橀噺锛?  FISHING_GAME_DIR   娓告垙鐩綍锛堥粯璁?~/ai-fishing-game锛?  PORT               鐩戝惉绔彛锛堥粯璁?8891锛?"""
+环境变量:
+  FISHING_GAME_DIR   游戏目录（默认 ~/ai-fishing-game）
+  PORT               监听端口（默认 8891）"""
 
 import os, json, sys
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -18,13 +20,13 @@ import fishing
 TOOLS = [
     {
         "name": "fishing_cast",
-        "description": "鎶涚閽撻奔銆傚彲浠ヤ竴娆¤繛閽撳绔匡紙鏈€澶?20 绔匡級銆傝繑鍥為挀鍒扮殑楸兼垨閽撶┖鐨勭粨鏋溿€?,
+        "description": "Cast the fishing line. Can cast multiple times in one call (up to 20). Returns the fish caught or empty result.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "times": {
                     "type": "integer",
-                    "description": "杩為挀娆℃暟锛岄粯璁?1锛屾渶澶?20",
+                    "description": "Number of casts, default 1, max 20",
                     "minimum": 1,
                     "maximum": 20,
                     "default": 1
@@ -34,7 +36,7 @@ TOOLS = [
     },
     {
         "name": "fishing_status",
-        "description": "鏌ョ湅褰撳墠娓告垙鐘舵€侊細瀛ｈ妭銆佸湴鐐广€佺偣鏁般€侀奔绡撱€佸浘閴磋繘搴︾瓑銆?,
+        "description": "Check current game status: season, location, points, fish basket, map progress, etc.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -42,7 +44,7 @@ TOOLS = [
     },
     {
         "name": "fishing_sell",
-        "description": "鍗栨帀楸肩瘬閲岀殑鎵€鏈夐奔锛岃幏寰楃偣鏁般€?,
+        "description": "Sell all fish in the basket to gain points.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -50,7 +52,7 @@ TOOLS = [
     },
     {
         "name": "fishing_encyclopedia",
-        "description": "鏌ョ湅楸肩被鍥鹃壌锛屼簡瑙ｅ凡鍙戠幇鐨勯奔鐨勪俊鎭€?,
+        "description": "View the fish encyclopedia to learn about all discovered fish species.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -58,13 +60,13 @@ TOOLS = [
     },
     {
         "name": "fishing_goto",
-        "description": "绉诲姩鍒版寚瀹氶挀楸煎湴鐐广€傚厛鐢?status 鎴?help 鏌ョ湅鍙敤鍦扮偣銆?,
+        "description": "Move to a specified fishing location. Use status or help to see available locations.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "鐩爣鍦扮偣鐨?ID锛屽 moonlit_pond銆乺eed_river 绛?
+                    "description": "Target location ID, e.g. moonlit_pond, reed_river"
                 }
             },
             "required": ["location"]
@@ -72,13 +74,13 @@ TOOLS = [
     },
     {
         "name": "fishing_buy",
-        "description": "璐拱鐗╁搧鎴栬В閿佸湴鐐广€傚厛鐢?help 鏌ョ湅鍙喘涔扮殑鍐呭銆?,
+        "description": "Purchase items or unlock locations. Use help to see available items.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "item": {
                     "type": "string",
-                    "description": "瑕佽喘涔扮殑鐗╁搧鎴栧湴鐐?ID"
+                    "description": "Item or location ID to purchase"
                 }
             },
             "required": ["item"]
@@ -86,7 +88,7 @@ TOOLS = [
     },
     {
         "name": "fishing_help",
-        "description": "鏌ョ湅娓告垙甯姪锛屼簡瑙ｆ墍鏈夊彲鐢ㄥ懡浠ゅ拰瑙勫垯銆?,
+        "description": "View game help: all available commands and rules.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -94,13 +96,13 @@ TOOLS = [
     },
     {
         "name": "fishing_cmd",
-        "description": "鐩存帴鎵ц浠绘剰娓告垙鍛戒护锛堥珮绾х敤娉曪級銆?,
+        "description": "Execute any game command directly (advanced use).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "瑕佹墽琛岀殑鍛戒护锛屽 'dive'銆?rest' 绛?
+                    "description": "Command to execute, e.g. 'dive', 'rest'"
                 }
             },
             "required": ["command"]
@@ -110,28 +112,28 @@ TOOLS = [
 
 
 def run_tool(name, args):
-    if name == "cast":
+    if name == "fishing_cast":
         times = args.get("times", 1)
         if times == 1:
             return fishing.cmd("cast")
         else:
             return fishing.cmd(f"cast {times}")
-    elif name == "status":
+    elif name == "fishing_status":
         return fishing.cmd("status")
-    elif name == "sell":
+    elif name == "fishing_sell":
         return fishing.cmd("sell all")
-    elif name == "encyclopedia":
+    elif name == "fishing_encyclopedia":
         return fishing.cmd("encyclopedia")
-    elif name == "goto":
+    elif name == "fishing_goto":
         return fishing.cmd(f"goto {args['location']}")
-    elif name == "buy":
+    elif name == "fishing_buy":
         return fishing.cmd(f"buy {args['item']}")
-    elif name == "help":
+    elif name == "fishing_help":
         return fishing.cmd("help")
-    elif name == "cmd":
+    elif name == "fishing_cmd":
         return fishing.cmd(args["command"])
     else:
-        return f"鏈煡宸ュ叿锛歿name}"
+        return f"Unknown tool: {name}"
 
 
 def json_response(handler, obj, status=200):
@@ -155,7 +157,6 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             json_response(self, {"ok": True})
         elif self.path in ("/", "/mcp"):
-            # SSE endpoint for MCP 鈥?return server info
             json_response(self, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
@@ -198,7 +199,7 @@ class MCPHandler(BaseHTTPRequestHandler):
             try:
                 result = run_tool(tool_name, tool_args)
             except Exception as e:
-                result = f"[閿欒] {e}"
+                result = f"[Error] {e}"
             json_response(self, {
                 "jsonrpc": "2.0", "id": req_id,
                 "result": {
@@ -219,9 +220,8 @@ class MCPHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"馃帲  閽撻奔 MCP 宸插惎鍔?)
-    print(f"    绔彛锛歿PORT}")
-    print(f"    娓告垙鐩綍锛歿GAME_DIR}")
-    print(f"    MCP 鍦板潃锛歨ttp://0.0.0.0:{PORT}/mcp")
+    print(f"🎣  Fishing MCP started")
+    print(f"    Port: {PORT}")
+    print(f"    Game dir: {GAME_DIR}")
+    print(f"    MCP URL: http://0.0.0.0:{PORT}/mcp")
     ThreadingHTTPServer(("0.0.0.0", PORT), MCPHandler).serve_forever()
-
