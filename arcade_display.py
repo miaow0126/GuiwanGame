@@ -103,13 +103,17 @@ def update_history(cache, hist):
 
     if "prev_prizes" not in hist:
         # first run – stamp existing prizes as "首次记录"
+        init_cost = 0
         for pid in curr_prizes:
             info = PRIZE_INFO.get(pid, (pid, "🎁", "gift", 0))
+            init_cost += info[3]
             hist.setdefault("prize_events", []).append({
                 "id": pid, "name": info[0], "emoji": info[1],
                 "cost": info[3], "category": info[2],
                 "obtained_at": ts, "used_at": None, "init": True,
             })
+        # bootstrap cumulative winnings = current balance + all prizes already bought
+        hist["cumulative_winnings"] = curr_w + init_cost
     else:
         prev_prizes = hist["prev_prizes"]
         curr_c = Counter(curr_prizes)
@@ -250,9 +254,9 @@ def build_body(cache, hist):
 </div>"""
 
     # ── 账目 ──
-    events   = hist.get("prize_events", [])
-    obtains  = events  # include init entries
-    total_spent = sum(e["cost"] for e in obtains if not e.get("init"))
+    events      = hist.get("prize_events", [])
+    obtains     = events
+    total_spent = sum(e["cost"] for e in obtains)
 
     ledger_rows = ""
     for ev in sorted(obtains, key=lambda x: x["obtained_at"], reverse=True)[:30]:
