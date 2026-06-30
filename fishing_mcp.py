@@ -21,6 +21,7 @@ from mcp.server.fastmcp import FastMCP
 import uvicorn
 from starlette.middleware.cors import CORSMiddleware
 
+os.environ.setdefault("MCP_ALLOW_ALL_ORIGINS", "1")
 mcp = FastMCP("fishing-mcp")
 
 
