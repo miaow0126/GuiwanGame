@@ -251,8 +251,8 @@ def build_body(cache, hist):
 
     # ── 账目 ──
     events   = hist.get("prize_events", [])
-    obtains  = [e for e in events if not e.get("init")]
-    total_spent = sum(e["cost"] for e in obtains)
+    obtains  = events  # include init entries
+    total_spent = sum(e["cost"] for e in obtains if not e.get("init"))
 
     ledger_rows = ""
     for ev in sorted(obtains, key=lambda x: x["obtained_at"], reverse=True)[:30]:
@@ -260,10 +260,11 @@ def build_body(cache, hist):
             st = f'<span style="color:#c06050">已使用 · {ev["used_at"][5:16]}</span>'
         else:
             st = '<span style="color:#4db86a">持有中</span>'
+        cost_txt = f'<span style="color:#604830">记录前</span>' if ev.get("init") else f'<span style="color:#c06050">-{ev["cost"]}</span>'
         ledger_rows += f"""<tr>
   <td>{ev['emoji']} {ev['name']}</td>
   <td>{CAT_LABEL.get(ev['category'], ev['category'])}</td>
-  <td style="color:#c06050">-{ev['cost']}</td>
+  <td>{cost_txt}</td>
   <td>{ev['obtained_at'][5:16]}</td>
   <td>{st}</td>
 </tr>"""
