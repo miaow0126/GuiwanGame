@@ -14,7 +14,7 @@ PORT        = int(os.environ.get("DISPLAY_PORT", 8896))
 DATA_FILE   = Path(os.environ.get("DATA_FILE", "/root/arcade-display/data.json"))
 UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "guiwan-arcade-2026")
 
-HTML = """<!DOCTYPE html>
+HTML_HEAD = """<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -34,31 +34,28 @@ header {
 .subtitle { font-size: .85rem; color: #806040; margin-top: 4px; }
 .refresh-time { font-size: .8rem; color: #604830; text-align: right; }
 .main { padding: 24px 32px; max-width: 1000px; margin: 0 auto; }
-
 .stats-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 24px; }
 .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
 .stat-label { font-size: .72rem; color: #806040; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
 .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
 .stat-sub { font-size: .78rem; color: #a08060; margin-top: 3px; }
-
 .section-title { font-size: .75rem; color: #806040; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
-
 .games-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 24px; }
 .game-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
 .game-name { font-size: 1rem; font-weight: 600; margin-bottom: 10px; color: var(--accent); }
 .game-stat { display: flex; justify-content: space-between; font-size: .82rem; padding: 3px 0; color: #a08060; }
 .game-stat span:last-child { color: #d8c8a0; }
-
 .prizes-wrap { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
 .prize-chip { background: #2a1a00; border: 1px solid #f0a04044; border-radius: 20px; padding: 5px 14px; font-size: .82rem; color: var(--accent); }
 .no-prize { color: #604830; font-size: .85rem; }
-
 .log-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; white-space: pre-wrap; font-size: .85rem; line-height: 1.8; color: #a08060; min-height: 60px; margin-bottom: 24px; }
 .no-data { text-align: center; padding: 80px 20px; color: #604830; }
 .no-data .icon { font-size: 3rem; margin-bottom: 16px; }
 </style>
 </head>
-<body>
+<body>"""
+
+HTML = HTML_HEAD + """
 <header>
   <div>
     <div class="title">🎰 桂晚的赌场</div>
