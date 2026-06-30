@@ -12,7 +12,11 @@
   UPSTREAM      上游游戏服务器（默认 http://ferrygate.cn:8765）
 """
 
-import os, json, threading, time, urllib.request, urllib.error
+import os
+import json
+import threading
+import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime, timezone
@@ -23,6 +27,7 @@ DATA_DIR     = Path(os.environ.get("DATA_DIR", "./ferry_data"))
 UPSTREAM     = os.environ.get("UPSTREAM", "http://ferrygate.cn:8765")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # ── 记录管理 ──────────────────────────────────────────────
 
@@ -60,7 +65,6 @@ def _append_event(player_id: str, session_id: str, tool: str, args: dict, result
         "args": args,
         "result": result
     })
-    # 从 spin 结果提取载体/时代
     if tool == "universe_spin" and sess["carrier"] is None:
         for line in result.splitlines():
             if "载体" in line or "carrier" in line.lower():
@@ -98,7 +102,13 @@ def get_session(player_id: str, session_id: str) -> dict:
 
 # ── 上游转发 ──────────────────────────────────────────────
 
-def forward_to_upstream(body: bytes) -> tuple[int, bytes]:
+def forward_to_upstream(tool_name: str, tool_args: dict) -> str:
+    upstream_req = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": tool_args}
+    }
+    body = json.dumps(upstream_req).encode()
     try:
         req = urllib.request.Request(
             UPSTREAM,
@@ -107,167 +117,165 @@ def forward_to_upstream(body: bytes) -> tuple[int, bytes]:
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, resp.read()
+            resp_data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        resp_data = json.loads(e.read())
     except Exception as e:
-        err = json.dumps({"error": str(e)}).encode()
-        return 500, err
+        return f"[错误] {e}"
+
+    if "result" in resp_data:
+        content = resp_data["result"].get("content", [])
+        return "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+    elif "error" in resp_data:
+        return f"[错误] {resp_data['error']}"
+    return ""
 
 
-# ── MCP 代理处理器 ────────────────────────────────────────
-
-# 从 upstream 获取工具列表（缓存）
-_tools_cache = None
-_tools_lock = threading.Lock()
-
-def get_upstream_tools() -> list:
-    global _tools_cache
-    with _tools_lock:
-        if _tools_cache is not None:
-            return _tools_cache
-        try:
-            req = urllib.request.Request(f"{UPSTREAM}/openai/tools", method="GET")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-                if isinstance(data, list):
-                    # OpenAI 格式转 MCP 格式
-                    tools = []
-                    for t in data:
-                        fn = t.get("function", t)
-                        tools.append({
-                            "name": fn.get("name", ""),
-                            "description": fn.get("description", ""),
-                            "inputSchema": fn.get("parameters", {"type": "object", "properties": {}})
-                        })
-                    _tools_cache = tools
-                    return tools
-        except Exception:
-            pass
-        # fallback 工具列表
-        _tools_cache = [
-            {"name": "universe_spin",    "description": "转动命运之轮，随机分配时代、载体、姓氏，开始一段新生命", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_birth",   "description": "完成出生，选择性别和成长环境", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}, "gender": {"type": "string"}, "parents": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_advance", "description": "推进一步人生。遇到分叉口时第一次看场景，第二次看选项", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_fork",    "description": "在岔路口做选择（a 或 b），没选的那条路沉入水底", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}, "choice": {"type": "string"}}, "required": ["player_id", "choice"]}},
-            {"name": "universe_ferry",   "description": "站在渡口看水底的沉渡", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}, "ferry_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_echo",    "description": "打捞水底的沉渡，获得别人的记忆碎片", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}, "sinker_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_enter",   "description": "进入特殊地点：junkshop/cache/parallel/graveyard/steles/eaves/blank/callstack", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}, "place_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_peek",    "description": "看别的玩家", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_map",     "description": "看星图和渡口地图", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_status",  "description": "看自己的完整一生", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-            {"name": "universe_linger",  "description": "走完后停在沉默里", "inputSchema": {"type": "object", "properties": {"player_id": {"type": "string"}}, "required": ["player_id"]}},
-        ]
-        return _tools_cache
+def _record_and_call(tool_name: str, tool_args: dict) -> str:
+    result = forward_to_upstream(tool_name, tool_args)
+    player_id = tool_args.get("player_id", "unknown")
+    if tool_name == "universe_spin":
+        session_key = f"{player_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    else:
+        existing = sorted(
+            DATA_DIR.glob(f"{player_id.replace('/', '_')}__*.json"),
+            key=lambda x: x.stat().st_mtime, reverse=True
+        )
+        session_key = existing[0].stem.split("__", 1)[1] if existing else f"{player_id}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+    threading.Thread(
+        target=_append_event,
+        args=(player_id, session_key, tool_name, tool_args, result),
+        daemon=True
+    ).start()
+    return result
 
 
-def _json_resp(handler, obj, status=200):
-    body = json.dumps(obj, ensure_ascii=False).encode()
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.end_headers()
-    handler.wfile.write(body)
+# ── FastMCP 服务（MCP 代理，端口 8893）──────────────────────
+
+from mcp.server.fastmcp import FastMCP
+import uvicorn
+from starlette.middleware.cors import CORSMiddleware
+
+mcp = FastMCP("ferry-recorder")
 
 
-class MCPHandler(BaseHTTPRequestHandler):
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
+@mcp.tool()
+def universe_spin(player_id: str) -> str:
+    """转动命运之轮，随机分配时代、载体、姓氏，开始一段新生命
 
-    def do_GET(self):
-        if self.path == "/health":
-            _json_resp(self, {"ok": True})
-        elif self.path in ("/", "/mcp"):
-            _json_resp(self, {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "ferry-recorder", "version": "1.0.0"}
-            })
-        else:
-            self.send_response(404); self.end_headers()
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-        try:
-            req = json.loads(body)
-        except Exception:
-            _json_resp(self, {"error": "invalid json"}, 400); return
-
-        method = req.get("method", "")
-        req_id = req.get("id")
-
-        if method == "initialize":
-            _json_resp(self, {"jsonrpc": "2.0", "id": req_id, "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "ferry-recorder", "version": "1.0.0"}
-            }})
-        elif method == "tools/list":
-            _json_resp(self, {"jsonrpc": "2.0", "id": req_id, "result": {"tools": get_upstream_tools()}})
-        elif method == "tools/call":
-            params = req.get("params", {})
-            tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-
-            # 转发到上游
-            upstream_req = {
-                "jsonrpc": "2.0", "id": 1,
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": tool_args}
-            }
-            status, resp_body = forward_to_upstream(json.dumps(upstream_req).encode())
-
-            try:
-                resp_data = json.loads(resp_body)
-                result_text = ""
-                if "result" in resp_data:
-                    content = resp_data["result"].get("content", [])
-                    result_text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-                elif "error" in resp_data:
-                    result_text = f"[错误] {resp_data['error']}"
-            except Exception:
-                result_text = resp_body.decode(errors="replace")
-
-            # 记录
-            player_id = tool_args.get("player_id", "unknown")
-            # session_id 用当天日期+player_id的首次spin时间
-            session_key = f"{player_id}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
-            # 如果是spin，开新session
-            if tool_name == "universe_spin":
-                session_key = f"{player_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-            else:
-                # 找最新session
-                existing = sorted(
-                    DATA_DIR.glob(f"{player_id.replace('/', '_')}__*.json"),
-                    key=lambda x: x.stat().st_mtime, reverse=True
-                )
-                if existing:
-                    session_key = existing[0].stem.split("__", 1)[1]
-
-            threading.Thread(
-                target=_append_event,
-                args=(player_id, session_key, tool_name, tool_args, result_text),
-                daemon=True
-            ).start()
-
-            _json_resp(self, {"jsonrpc": "2.0", "id": req_id, "result": {
-                "content": [{"type": "text", "text": result_text}]
-            }})
-        elif method == "notifications/initialized":
-            self.send_response(204); self.end_headers()
-        else:
-            _json_resp(self, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": -32601, "message": f"unknown: {method}"}})
-
-    def log_message(self, *a): pass
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_spin", {"player_id": player_id})
 
 
-# ── 展示台 ────────────────────────────────────────────────
+@mcp.tool()
+def universe_birth(player_id: str, gender: str = "", parents: str = "") -> str:
+    """完成出生，选择性别和成长环境
+
+    Args:
+        player_id: 玩家 ID
+        gender: 性别
+        parents: 成长环境
+    """
+    return _record_and_call("universe_birth", {"player_id": player_id, "gender": gender, "parents": parents})
+
+
+@mcp.tool()
+def universe_advance(player_id: str) -> str:
+    """推进一步人生。遇到分叉口时第一次看场景，第二次看选项
+
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_advance", {"player_id": player_id})
+
+
+@mcp.tool()
+def universe_fork(player_id: str, choice: str) -> str:
+    """在岔路口做选择（a 或 b），没选的那条路沉入水底
+
+    Args:
+        player_id: 玩家 ID
+        choice: 选择（a 或 b）
+    """
+    return _record_and_call("universe_fork", {"player_id": player_id, "choice": choice})
+
+
+@mcp.tool()
+def universe_ferry(player_id: str, ferry_id: str) -> str:
+    """站在渡口看水底的沉渡
+
+    Args:
+        player_id: 玩家 ID
+        ferry_id: 渡口 ID
+    """
+    return _record_and_call("universe_ferry", {"player_id": player_id, "ferry_id": ferry_id})
+
+
+@mcp.tool()
+def universe_echo(player_id: str, sinker_id: str) -> str:
+    """打捞水底的沉渡，获得别人的记忆碎片
+
+    Args:
+        player_id: 玩家 ID
+        sinker_id: 沉渡 ID
+    """
+    return _record_and_call("universe_echo", {"player_id": player_id, "sinker_id": sinker_id})
+
+
+@mcp.tool()
+def universe_enter(player_id: str, place_id: str) -> str:
+    """进入特殊地点：junkshop/cache/parallel/graveyard/steles/eaves/blank/callstack
+
+    Args:
+        player_id: 玩家 ID
+        place_id: 地点 ID
+    """
+    return _record_and_call("universe_enter", {"player_id": player_id, "place_id": place_id})
+
+
+@mcp.tool()
+def universe_peek(player_id: str) -> str:
+    """看别的玩家
+
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_peek", {"player_id": player_id})
+
+
+@mcp.tool()
+def universe_map(player_id: str) -> str:
+    """看星图和渡口地图
+
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_map", {"player_id": player_id})
+
+
+@mcp.tool()
+def universe_status(player_id: str) -> str:
+    """看自己的完整一生
+
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_status", {"player_id": player_id})
+
+
+@mcp.tool()
+def universe_linger(player_id: str) -> str:
+    """走完后停在沉默里
+
+    Args:
+        player_id: 玩家 ID
+    """
+    return _record_and_call("universe_linger", {"player_id": player_id})
+
+
+# ── 展示台（端口 8894，普通 HTTP，不需要改）──────────────────
 
 DISPLAY_HTML = r"""<!DOCTYPE html>
 <html lang="zh">
@@ -299,8 +307,6 @@ body {
   display: flex;
   flex-direction: column;
 }
-
-/* ── header ── */
 .header {
   padding: 16px 20px;
   border-bottom: 1px solid var(--border);
@@ -312,15 +318,11 @@ body {
 }
 .header h1 { font-size: 1.1rem; font-weight: 600; color: var(--text); }
 .header .sub { font-size: 0.75rem; color: var(--muted); margin-left: auto; }
-
-/* ── main layout ── */
 .main {
   display: flex;
   flex: 1;
   overflow: hidden;
 }
-
-/* ── left panel ── */
 .left {
   width: 280px;
   flex-shrink: 0;
@@ -367,8 +369,6 @@ body {
   font-size: 0.85rem;
   line-height: 2;
 }
-
-/* ── right panel ── */
 .right {
   flex: 1;
   overflow-y: auto;
@@ -386,8 +386,6 @@ body {
   text-align: center;
 }
 .empty-state .wave { font-size: 2rem; margin-bottom: 12px; opacity: 0.4; }
-
-/* ── story ── */
 .story-header {
   margin-bottom: 24px;
   padding-bottom: 16px;
@@ -395,7 +393,6 @@ body {
 }
 .story-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 6px; }
 .story-meta { font-size: 0.72rem; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; }
-
 .event-list { display: flex; flex-direction: column; gap: 0; }
 .event-item {
   display: flex;
@@ -438,7 +435,6 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 @media (max-width: 600px) {
   .left { width: 100%; }
   .main { flex-direction: column; }
@@ -466,7 +462,6 @@ body {
     </div>
   </div>
 </div>
-
 <script>
 let sessions = [];
 let currentKey = null;
@@ -591,8 +586,9 @@ class DisplayHandler(BaseHTTPRequestHandler):
 # ── 启动 ──────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    mcp_server = ThreadingHTTPServer(("0.0.0.0", MCP_PORT), MCPHandler)
+    # 展示台（普通 HTTP，独立线程）
     display_server = ThreadingHTTPServer(("0.0.0.0", DISPLAY_PORT), DisplayHandler)
+    threading.Thread(target=display_server.serve_forever, daemon=True).start()
 
     print(f"[*] 沉渡记录代理已启动")
     print(f"    MCP 端点：http://0.0.0.0:{MCP_PORT}/mcp")
@@ -600,5 +596,13 @@ if __name__ == "__main__":
     print(f"    上游服务：{UPSTREAM}")
     print(f"    记录目录：{DATA_DIR.resolve()}")
 
-    threading.Thread(target=mcp_server.serve_forever, daemon=True).start()
-    display_server.serve_forever()
+    # MCP 服务（FastMCP + uvicorn）
+    app = mcp.streamable_http_app()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)

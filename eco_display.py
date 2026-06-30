@@ -2,54 +2,27 @@
 """桂晚的瓶中生态展示台 —— 端口 8895
 - GET  /        展示页面
 - POST /update  推送数据（X-Token 鉴权）
-- GET  /mcp     MCP 握手
-- POST /mcp     MCP JSON-RPC（工具：push_eco_data）
+- /mcp          MCP streamable-http（工具：push_eco_data）
 """
 
-import os, json
+import os
+import json
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 PORT = int(os.environ.get("DISPLAY_PORT", 8895))
 PLAYER_ID = os.environ.get("PLAYER_ID", "guiwan")
 DATA_FILE = Path(os.environ.get("DATA_FILE", "/root/eco-display/data.json"))
 UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "guiwan-eco-2026")
 
-MCP_TOOLS = [
-    {
-        "name": "push_eco_data",
-        "description": "把瓶中生态的最新状态推送到桂晚的展示台。每次玩完 eco 游戏后调用。调用前必须先获取两项数据：①调用 eco_info action=status 获取 status_json（取返回文本末尾花括号包裹的 JSON 字符串）；②调用 eco_info action=chronicle scope=all 获取完整年鉴文本。然后把这两项作为参数传入本工具。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "status_json": {
-                    "type": "string",
-                    "description": "eco_info status 返回结果末尾的 JSON 字符串（花括号包裹的那段）"
-                },
-                "chronicle": {
-                    "type": "string",
-                    "description": "eco_info chronicle scope=all 的返回文本"
-                },
-                "locked_count": {
-                    "type": "integer",
-                    "description": "未解锁物种总数（可选，默认 0）",
-                    "default": 0
-                }
-            },
-            "required": ["status_json", "chronicle"]
-        }
-    }
-]
 
 def _extract_json(raw: str) -> dict:
     """从可能含有前缀文字的字符串中提取 JSON 对象，用括号配对而非 rfind。"""
     raw = raw.strip()
-    # 先直接尝试
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    # 找第一个 { 并配对到对应的 }
     start = raw.find("{")
     if start != -1:
         depth = 0
@@ -137,6 +110,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
 def load_cache():
     if DATA_FILE.exists():
         try:
@@ -144,6 +118,7 @@ def load_cache():
         except Exception:
             pass
     return None
+
 
 def build_body(cache):
     if cache is None:
@@ -214,118 +189,87 @@ def build_body(cache):
     return stats + score_bar + env + pop_section + settler_section + chronicle_section
 
 
-class DisplayHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self._json({"ok": True}); return
-        if self.path == "/mcp":
-            self._json({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "eco-display-mcp", "version": "1.0.0"}
-            }); return
-        if self.path not in ("/", "/index.html"):
-            self.send_response(404); self.end_headers(); return
+from mcp.server.fastmcp import FastMCP
+import uvicorn
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse
 
-        from datetime import datetime, timezone, timedelta
-        now = datetime.now(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
-        cache = load_cache()
-        data_time = cache.get("updated_at", "—") if cache else "—"
+mcp = FastMCP("eco-display-mcp")
 
-        season = (cache or {}).get("status", {}).get("season", "春") if cache else "春"
-        cfg = SEASON_CONFIG.get(season, SEASON_CONFIG["春"])
-        body = build_body(cache)
-        html = HTML_TEMPLATE.format(
-            accent=cfg["color"], bg=cfg["bg"],
-            season_emoji=cfg["emoji"], player_id=PLAYER_ID,
-            refresh_time=now, data_time=data_time, body=body,
-        )
-        self._html(html)
 
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+@mcp.tool()
+def push_eco_data(status_json: str, chronicle: str, locked_count: int = 0) -> str:
+    """把瓶中生态的最新状态推送到桂晚的展示台。每次玩完 eco 游戏后调用。
+    调用前必须先获取两项数据：①调用 eco_info action=status 获取 status_json（取返回文本末尾花括号包裹的 JSON 字符串）；
+    ②调用 eco_info action=chronicle scope=all 获取完整年鉴文本。然后把这两项作为参数传入本工具。
 
-        if self.path == "/update":
-            token = self.headers.get("X-Token", "")
-            if token != UPDATE_TOKEN:
-                self.send_response(403); self.end_headers(); return
-            try:
-                payload = json.loads(body)
-                from datetime import datetime, timezone, timedelta
-                payload["updated_at"] = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
-                self._json({"ok": True})
-            except Exception as e:
-                self._json({"ok": False, "error": str(e)})
+    Args:
+        status_json: eco_info status 返回结果末尾的 JSON 字符串（花括号包裹的那段）
+        chronicle: eco_info chronicle scope=all 的返回文本
+        locked_count: 未解锁物种总数（可选，默认 0）
+    """
+    try:
+        status_obj = _extract_json(status_json)
+        payload = {
+            "status": status_obj,
+            "chronicle": chronicle,
+            "locked_count": locked_count,
+            "updated_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        }
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+        return "✅ 展示台已更新！"
+    except Exception as e:
+        return f"❌ 推送失败：{e}"
 
-        elif self.path == "/mcp":
-            try:
-                req = json.loads(body)
-            except Exception:
-                self._json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
-                return
-            method = req.get("method", "")
-            req_id = req.get("id")
 
-            if method == "initialize":
-                self._json({"jsonrpc": "2.0", "id": req_id, "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "eco-display-mcp", "version": "1.0.0"}
-                }})
-            elif method == "tools/list":
-                self._json({"jsonrpc": "2.0", "id": req_id, "result": {"tools": MCP_TOOLS}})
-            elif method == "tools/call":
-                params = req.get("params", {})
-                if params.get("name") == "push_eco_data":
-                    args = params.get("arguments", {})
-                    try:
-                        status_json = args.get("status_json", "{}")
-                        status_obj = _extract_json(status_json)
-                        from datetime import datetime, timezone, timedelta
-                        payload = {
-                            "status": status_obj,
-                            "chronicle": args.get("chronicle", ""),
-                            "locked_count": args.get("locked_count", 0),
-                            "updated_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                        DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
-                        self._json({"jsonrpc": "2.0", "id": req_id, "result": {
-                            "content": [{"type": "text", "text": "✅ 展示台已更新！"}]
-                        }})
-                    except Exception as e:
-                        self._json({"jsonrpc": "2.0", "id": req_id, "result": {
-                            "content": [{"type": "text", "text": f"❌ 推送失败：{e}"}]
-                        }})
-                else:
-                    self._json({"jsonrpc": "2.0", "id": req_id,
-                                "error": {"code": -32601, "message": "Unknown tool"}})
-            elif method == "notifications/initialized":
-                self.send_response(204); self.end_headers()
-            else:
-                self._json({"jsonrpc": "2.0", "id": req_id,
-                            "error": {"code": -32601, "message": f"Method not found: {method}"}})
-        else:
-            self.send_response(404); self.end_headers()
+@mcp.custom_route("/", methods=["GET"])
+async def index(request: Request):
+    now = datetime.now(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
+    cache = load_cache()
+    data_time = cache.get("updated_at", "—") if cache else "—"
+    season = (cache or {}).get("status", {}).get("season", "春") if cache else "春"
+    cfg = SEASON_CONFIG.get(season, SEASON_CONFIG["春"])
+    body = build_body(cache)
+    html = HTML_TEMPLATE.format(
+        accent=cfg["color"], bg=cfg["bg"],
+        season_emoji=cfg["emoji"], player_id=PLAYER_ID,
+        refresh_time=now, data_time=data_time, body=body,
+    )
+    return HTMLResponse(html)
 
-    def _html(self, content):
-        b = content.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers(); self.wfile.write(b)
 
-    def _json(self, obj):
-        b = json.dumps(obj).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers(); self.wfile.write(b)
+@mcp.custom_route("/update", methods=["POST"])
+async def update(request: Request):
+    token = request.headers.get("X-Token", "")
+    if token != UPDATE_TOKEN:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+    try:
+        payload = await request.json()
+        payload["updated_at"] = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
-    def log_message(self, fmt, *args): pass
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request):
+    return JSONResponse({"ok": True})
 
 
 if __name__ == "__main__":
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     print(f"🌿 瓶中生态展示台已启动  端口:{PORT}  玩家:{PLAYER_ID}")
-    ThreadingHTTPServer(("0.0.0.0", PORT), DisplayHandler).serve_forever()
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
