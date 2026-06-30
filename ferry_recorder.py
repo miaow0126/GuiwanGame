@@ -605,4 +605,4 @@ if __name__ == "__main__":
         allow_headers=["*"],
         expose_headers=["*"],
     )
-    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, forwarded_allow_ips="*")
